@@ -3,8 +3,10 @@
 
 #include <QTableWidget>
 #include <QStyledItemDelegate>
+#include "sudokuconflicts.h"
 
 class Cell;
+class Conflicts;
 
 class DrawGridDelegate : public QStyledItemDelegate
 {
@@ -17,10 +19,13 @@ signals:
 private slots:
     void onHoverRowChanged(int row);
     void onHoverColChanged(int col);
+    void onConflictChanged(std::vector<QPoint> conf);
+    void onReset();
 private:
     int boxLength;
     int highlightRow = -1;
     int highlightCol = -1;
+    std::vector<QPoint> conflicts;
 };
 
 class BoardDialog : public QTableWidget
@@ -29,18 +34,30 @@ class BoardDialog : public QTableWidget
 public:
     BoardDialog(QWidget* parent = nullptr);
     void solve();
+    int boxLength() const;
+    int boardLength() const;
+    int displayTime() const;
+    bool displaySolver() const;
+    void setDisplayTime(int ms);
     void setDisplaySolver(bool b);
-    void setDisplayTime(int milliseconds);
+    int value(int row, int col) const;
+    void setValue(int row, int col, int value);
 signals:
     void hoverRowChanged(int row);
     void hoverColChanged(int col);
+    void resetBoard();
 private slots:
-    void mousePressEvent(QMouseEvent* e);
-    void mouseMoveEvent(QMouseEvent* e);
     void onFinishPaint();
+protected:
+    void mousePressEvent(QMouseEvent* event);
+    void mouseMoveEvent(QMouseEvent* event);
+    void keyPressEvent(QKeyEvent* event);
 private:
-    bool displaySolver = false;
-    int milliseconds = 25;
+    bool editing;
+    bool solver;
+    int milliseconds;
+    Conflicts* conflict;
+
     enum{ BoxLength = 3, MinClues = 17, EasyClues = 31 };
     const QColor colours[5] = {QColor(255,0,0,125), QColor(0,255,0,125), QColor(0,0,255,125),
                       QColor(255,255,255,125),
@@ -49,17 +66,15 @@ private:
     Cell* cell(int row, int col) const;
     void setItemForeground(int row, int col, const QColor& color);
     void setItemBackground(int row, int col, const QColor& color);
+    void setZeroBoard();
     void setHighlight(int row, int col);
     void undoHighlight(int row, int col);
     void wait(int interval);
 
-    int value(int row, int col) const;
-    void setValue(int row, int col, int value);
-
-    bool validInsert(int row, int col);
-    bool validRow(int row);
-    bool validCol(int col);
-    bool validBox(int row, int col);
+    bool validInsert(int row, int col) const;
+    bool validRow(int row) const;
+    bool validCol(int col) const;
+    bool validBox(int row, int col) const;
 
     bool solveBoard(int position);
     void removeClues();

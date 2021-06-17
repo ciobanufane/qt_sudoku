@@ -1,4 +1,5 @@
 #include <QtWidgets>
+#include <QItemSelectionModel>
 #include <cstdlib>
 #include <ctime>
 #include <vector>
@@ -14,22 +15,35 @@ DrawGridDelegate::DrawGridDelegate(int boxLength, QObject* parent) : QStyledItem
 void DrawGridDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const
 {
     const QRect rect(option.rect);
-    painter->setPen(QPen(Qt::black, 3));
 
     if (index.row() == highlightRow || index.column() == highlightCol) {
         painter->fillRect(rect, QColor(255,0,0,50));
     }
 
+    painter->save();
+    if (std::find(conflicts.begin(), conflicts.end(), QPoint(index.row(), index.column()))
+            != conflicts.end()) {
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QBrush(Qt::yellow, Qt::SolidPattern));
+        painter->drawEllipse(rect.center(), rect.height()/2, rect.height()/2);
+    }
+
+    painter->setPen(QPen(Qt::black, 3));
+    painter->setBrush(Qt::NoBrush);
+
     if (index.column()%boxLength == boxLength-1 && index.column() != index.model()->columnCount()-1) {
         painter->drawLine(rect.topRight(), rect.bottomRight());
     }
+
     if (index.row()%boxLength == boxLength-1 && index.row() != index.model()->rowCount()-1) {
         painter->drawLine(rect.bottomLeft(), rect.bottomRight());
     }
 
+    QStyledItemDelegate::paint(painter, option, index);
+    painter->restore();
+
     emit finishPaint();
 
-    QStyledItemDelegate::paint(painter, option, index);
 }
 
 void DrawGridDelegate::onHoverRowChanged(int row)
@@ -42,9 +56,23 @@ void DrawGridDelegate::onHoverColChanged(int col)
     highlightCol = col;
 }
 
+void DrawGridDelegate::onConflictChanged(std::vector<QPoint> conf)
+{
+    conflicts = conf;
+}
+
+void DrawGridDelegate::onReset()
+{
+    conflicts.clear();
+}
+
 BoardDialog::BoardDialog(QWidget* parent)
     : QTableWidget(parent)
 {
+    editing = true;
+    solver = false;
+    milliseconds = 25;
+
     setItemPrototype(new Cell);
     setItemDelegate(new DrawGridDelegate(BoxLength, this));
     setSelectionMode(SingleSelection);
@@ -53,8 +81,8 @@ BoardDialog::BoardDialog(QWidget* parent)
 
     setRowCount(0);
     setColumnCount(0);
-    setRowCount(BoxLength*BoxLength);
-    setColumnCount(BoxLength*BoxLength);
+    setRowCount(boardLength());
+    setColumnCount(boardLength());
 
     verticalHeader()->setDefaultSectionSize(30);
     verticalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -69,9 +97,46 @@ BoardDialog::BoardDialog(QWidget* parent)
 
     connect(this, SIGNAL(hoverRowChanged(int)), itemDelegate(), SLOT(onHoverRowChanged(int)));
     connect(this, SIGNAL(hoverColChanged(int)), itemDelegate(), SLOT(onHoverColChanged(int)));
+    connect(this, SIGNAL(resetBoard()), itemDelegate(), SLOT(onReset()));
     connect(itemDelegate(), SIGNAL(finishPaint()), this, SLOT(onFinishPaint()));
 
+    conflict = new Conflicts(this);
+    connect(this, SIGNAL(resetBoard()), conflict, SLOT(onReset()));
+    connect(this, SIGNAL(cellChanged(int,int)), conflict, SLOT(onCellChanged(int,int)));
+    connect(conflict, SIGNAL(conflictChanged(std::vector<QPoint>)),
+            itemDelegate(), SLOT(onConflictChanged(std::vector<QPoint>)));
+
     std::srand(std::time(nullptr));
+}
+
+int BoardDialog::boxLength() const
+{
+    return BoxLength;
+}
+
+int BoardDialog::boardLength() const
+{
+    return BoxLength*BoxLength;
+}
+
+int BoardDialog::displayTime() const
+{
+    return milliseconds;
+}
+
+bool BoardDialog::displaySolver() const
+{
+    return solver;
+}
+
+void BoardDialog::setDisplayTime(int ms)
+{
+    milliseconds = ms;
+}
+
+void BoardDialog::setDisplaySolver(bool b)
+{
+    solver = b;
 }
 
 Cell* BoardDialog::cell(int row, int col) const
@@ -97,6 +162,18 @@ void BoardDialog::setItemBackground(int row, int col, const QColor &color)
         setItem(row, col, c);
     }
     c->setData(Qt::BackgroundRole, color);
+}
+
+void BoardDialog::setZeroBoard()
+{
+    for (int row = 0; row < boardLength(); ++row) {
+        for (int col = 0; col < boardLength(); ++col) {
+            setValue(row, col, 0);
+            setItemForeground(row, col, QColor(Qt::black));
+            cell(row, col)->setFlags(Qt::ItemIsEnabled | Qt::ItemIsEditable | Qt::ItemIsSelectable);
+        }
+    }
+    emit resetBoard();
 }
 
 void BoardDialog::setHighlight(int row, int col)
@@ -151,13 +228,15 @@ void BoardDialog::wait(int interval)
     delete timer;
 }
 
-bool BoardDialog::validInsert(int row, int col) {
+bool BoardDialog::validInsert(int row, int col) const
+{
     return validBox(row, col)
             && validRow(row)
             && validCol(col);
 }
 
-bool BoardDialog::validRow(int row){
+bool BoardDialog::validRow(int row) const
+{
     unsigned short int match{1};
     unsigned short int mask;
 
@@ -171,7 +250,8 @@ bool BoardDialog::validRow(int row){
     return true;
 }
 
-bool BoardDialog::validCol(int col){
+bool BoardDialog::validCol(int col) const
+{
     unsigned short int match{1};
     unsigned short int mask;
 
@@ -185,7 +265,8 @@ bool BoardDialog::validCol(int col){
     return true;
 }
 
-bool BoardDialog::validBox(int row, int col) {
+bool BoardDialog::validBox(int row, int col) const
+{
     int topRow = (row / BoxLength) * BoxLength;
     int topCol = (col / BoxLength) * BoxLength;
 
@@ -210,24 +291,52 @@ void BoardDialog::solve()
     solveBoard(0);
 }
 
-void BoardDialog::mousePressEvent(QMouseEvent* e)
+void BoardDialog::mousePressEvent(QMouseEvent* event)
 {
-    if(e->button() == Qt::RightButton) {
+    if(event->button() == Qt::RightButton) {
+        setZeroBoard();
+        blockSignals(true);
         solve();
         removeClues();
         setFixedClues();
+        blockSignals(false);
     } else {
-        QTableWidget::mousePressEvent(e);
+        QTableWidget::mousePressEvent(event);
     }
 }
 
-void BoardDialog::mouseMoveEvent(QMouseEvent* e)
+void BoardDialog::mouseMoveEvent(QMouseEvent* event)
 {
     // row is treated as Y-value here and col is treated as X-value
-    int row = BoxLength*BoxLength*e->pos().y() / height();
-    int col = BoxLength*BoxLength*e->pos().x() / width();
+    int row = BoxLength*BoxLength*event->pos().y() / height();
+    int col = BoxLength*BoxLength*event->pos().x() / width();
     emit hoverRowChanged(row);
     emit hoverColChanged(col);
+}
+
+void BoardDialog::keyPressEvent(QKeyEvent *event)
+{
+    int key = event->key();
+    if (key >= Qt::Key_0 && key <= Qt::Key_9) {
+        QTableWidget::keyPressEvent(event);
+        editing = false;
+    }
+    else if (key == Qt::Key_Return || key == Qt::Key_Enter) {
+        if (editing) {
+            if (!currentItem()) {
+                setValue(currentRow(), currentColumn(), 0);
+            }
+            if ((currentItem()->flags() & Qt::ItemIsEditable) != 0) {
+                setCurrentIndex(currentIndex());
+                edit(currentIndex());
+                editing = false;
+            }
+        } else {
+            editing = true;
+        }
+    } else {
+        QTableWidget::keyPressEvent(event);
+    }
 }
 
 void BoardDialog::onFinishPaint()
@@ -253,7 +362,7 @@ bool BoardDialog::solveBoard(int position)
     std::vector<int> numList(boardLength);
     std::iota(numList.begin(), numList.end(), 1);
 
-    if (displaySolver)
+    if (solver)
         wait(milliseconds);
 
     if (value(x,y) == 0) {
@@ -297,7 +406,7 @@ void BoardDialog::setFixedClues()
         for (int col = 0; col < BoxLength*BoxLength; ++col) {
             if (value(row, col) != 0) {
                 setItemForeground(row, col, QColor(Qt::red));
-                cell(row, col)->setFlags(Qt::NoItemFlags | Qt::ItemIsSelectable);
+                cell(row, col)->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
             }
         }
     }
